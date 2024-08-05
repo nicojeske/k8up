@@ -54,6 +54,9 @@ type Configuration struct {
 	RestoreSnap        string
 	RestoreType        string
 	RestoreFilter      string
+	RestoreCACert      string
+	RestoreClientCert  string
+	RestoreClientKey   string
 	VerifyRestore      bool
 	RestoreTrimPath    bool
 
@@ -77,6 +80,11 @@ type Configuration struct {
 	TargetPods []string
 
 	SleepDuration time.Duration
+
+	VarDir     string
+	CACert     string
+	ClientCert string
+	ClientKey  string
 }
 
 // Validate ensures a consistent configuration and returns an error should that not be the case

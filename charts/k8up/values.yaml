@@ -10,7 +10,7 @@ image:
   # -- Operator image repository
   repository: k8up-io/k8up
   # -- Operator image tag (version)
-  tag: v2.7.2
+  tag: v2.11.0
 
 imagePullSecrets: []
 serviceAccount:
@@ -50,6 +50,9 @@ k8up:
   # -- Specifies whether leader election should be enabled.
   enableLeaderElection: true
 
+  # -- Specifies whether K8up should ignore PVCs without the backup annotation (by default, `k8up.io/backup`)
+  skipWithoutAnnotation: false
+
   # -- Specifies the namespace in which K8up's `EffectiveSchedules` are stored.
   # Defaults to release namespace if left empty.
   operatorNamespace: ""
@@ -77,6 +80,9 @@ podSecurityContext: {}
 # -- Container security context
 securityContext: {}
 
+# -- The name of the priority class to use.
+priorityClassName: ""
+
 nodeSelector: {}
 
 tolerations: []
@@ -87,6 +93,10 @@ metrics:
   service:
     port: 8080
     type: ClusterIP
+    # -- Set the ip family policy to configure dual-stack see [Configure dual-stack](https://kubernetes.io/docs/concepts/services-networking/dual-stack/#services)
+    ipFamilyPolicy: ""
+    # -- Sets the families that should be supported and the order in which they should be applied to ClusterIP as well. Can be IPv4 and/or IPv6.
+    ipFamilies: []
     # -- Service node port of the metrics endpoint, requires `metrics.service.type=NodePort`
     nodePort: 0
     # -- Annotations to add to the service
@@ -117,6 +127,13 @@ metrics:
     jobFailedRulesFor: ["archive", "backup", "check", "prune", "restore"]
     # -- Provide additional alert rules in addition to the defaults
     additionalRules: []
+  grafanaDashboard:
+    # -- Whether to deploy the Grafana dashboard
+    enabled: false
+    # -- If the object should be installed in a different namespace than operator
+    namespace: ""
+    # -- Add labels to the Grafana Dashboard object
+    additionalLabels: {}
 
 rbac:
   # -- Create cluster roles and rolebinding.
@@ -142,4 +159,3 @@ cleanup:
   repository: bitnami/kubectl
   # -- Cleanup-job image tag (version)
   tag: latest
-

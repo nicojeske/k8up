@@ -21,6 +21,7 @@ coverage/
 .cache
 _public/
 _archive/
+tmp/
 
 .github/release-notes.md
 
@@ -41,3 +42,11 @@ e2e/debug
 # Charts
 .cr-release-packages/
 .cr-index/
+
+# Vagrant
+.vagrant/
+
+# Container volumes mount
+.config/
+.kube/
+.npm/

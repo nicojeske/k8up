@@ -2,7 +2,6 @@
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  creationTimestamp: null
   name: manager-role
 rules:
 - apiGroups:
@@ -160,6 +159,14 @@ rules:
   - effectiveschedules/finalizers
   verbs:
   - update
+- apiGroups:
+  - k8up.io
+  resources:
+  - podconfigs
+  verbs:
+  - get
+  - list
+  - watch
 - apiGroups:
   - k8up.io
   resources:

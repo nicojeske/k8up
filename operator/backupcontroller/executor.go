@@ -7,6 +7,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/k8up-io/k8up/v2/operator/utils"
+
 	k8upv1 "github.com/k8up-io/k8up/v2/api/v1"
 	"github.com/k8up-io/k8up/v2/operator/cfg"
 	"github.com/k8up-io/k8up/v2/operator/executor"
@@ -67,6 +69,10 @@ func (b *BackupExecutor) listAndFilterPVCs(ctx context.Context, annotation strin
 		return nil, fmt.Errorf("list pods: %w", err)
 	}
 	for _, pod := range pods.Items {
+		if pod.Status.Phase != corev1.PodRunning {
+			log.V(1).Info("Ignoring Pod which is not running", "pod", pod.GetName())
+			continue
+		}
 		for _, volume := range pod.Spec.Volumes {
 			if volume.PersistentVolumeClaim != nil {
 				pvcPodMap[volume.PersistentVolumeClaim.ClaimName] = pod
@@ -85,7 +91,7 @@ func (b *BackupExecutor) listAndFilterPVCs(ctx context.Context, annotation strin
 
 	for _, pvc := range claimlist.Items {
 		if pvc.Status.Phase != corev1.ClaimBound {
-			log.Info("PVC is not bound", "pvc", pvc.GetName())
+			log.Info("PVC is not bound, skipping PVC", "pvc", pvc.GetName())
 			continue
 		}
 
@@ -93,12 +99,17 @@ func (b *BackupExecutor) listAndFilterPVCs(ctx context.Context, annotation strin
 
 		isRWO := containsAccessMode(pvc.Spec.AccessModes, corev1.ReadWriteOnce)
 		if !containsAccessMode(pvc.Spec.AccessModes, corev1.ReadWriteMany) && !isRWO && !hasBackupAnnotation {
-			log.Info("PVC is neither RWX nor RWO and has no backup annotation", "pvc", pvc.GetName())
+			log.Info("PVC is neither RWX nor RWO and has no backup annotation, skipping PVC", "pvc", pvc.GetName())
 			continue
 		}
 
 		if !hasBackupAnnotation {
-			log.Info("PVC doesn't have annotation, adding to list", "pvc", pvc.GetName())
+			if cfg.Config.SkipWithoutAnnotation {
+				log.Info("PVC doesn't have annotation and BACKUP_SKIP_WITHOUT_ANNOTATION is true, skipping PVC", "pvc", pvc.GetName())
+				continue
+			} else {
+				log.Info("PVC doesn't have annotation, adding to list", "pvc", pvc.GetName())
+			}
 		} else if shouldBackup, _ := strconv.ParseBool(backupAnnotation); !shouldBackup {
 			log.Info("PVC skipped due to annotation", "pvc", pvc.GetName(), "annotation", backupAnnotation)
 			continue
@@ -132,8 +143,7 @@ func (b *BackupExecutor) listAndFilterPVCs(ctx context.Context, annotation strin
 
 			bi.node = findNode(pv, pvc)
 			if bi.node == "" {
-				log.Info("RWO PVC not bound and no PV node affinity set, skipping", "pvc", pvc.GetName(), "affinity", pv.Spec.NodeAffinity)
-				continue
+				log.Info("RWO PVC not bound and no PV node affinity set, adding", "pvc", pvc.GetName(), "affinity", pv.Spec.NodeAffinity)
 			}
 			log.V(1).Info("node found in PV or PVC", "pvc", pvc.GetName(), "node", bi.node)
 		} else {
@@ -228,7 +238,7 @@ func (b *BackupExecutor) startBackup(ctx context.Context) error {
 	index := 0
 	for _, batchJob := range backupJobs {
 		_, err = controllerruntime.CreateOrUpdate(ctx, b.Generic.Config.Client, batchJob.job, func() error {
-			mutateErr := job.MutateBatchJob(batchJob.job, b.backup, b.Generic.Config)
+			mutateErr := job.MutateBatchJob(ctx, batchJob.job, b.backup, b.Generic.Config, b.Client)
 			if mutateErr != nil {
 				return mutateErr
 			}
@@ -237,7 +247,7 @@ func (b *BackupExecutor) startBackup(ctx context.Context) error {
 			if setupErr != nil {
 				return setupErr
 			}
-			batchJob.job.Spec.Template.Spec.Containers[0].Env = vars
+			batchJob.job.Spec.Template.Spec.Containers[0].Env = append(batchJob.job.Spec.Template.Spec.Containers[0].Env, vars...)
 			if len(batchJob.targetPods) > 0 {
 				batchJob.job.Spec.Template.Spec.Containers[0].Env = append(batchJob.job.Spec.Template.Spec.Containers[0].Env, corev1.EnvVar{
 					Name:  "TARGET_PODS",
@@ -255,14 +265,19 @@ func (b *BackupExecutor) startBackup(ctx context.Context) error {
 			if index > 0 {
 				batchJob.job.Spec.Template.Spec.Containers[0].Env = append(batchJob.job.Spec.Template.Spec.Containers[0].Env, corev1.EnvVar{
 					Name:  "SLEEP_DURATION",
-					Value: (5 * time.Second).String(),
+					Value: (time.Duration(index) * time.Second).String(),
 				})
 			}
 			b.backup.Spec.AppendEnvFromToContainer(&batchJob.job.Spec.Template.Spec.Containers[0])
-			batchJob.job.Spec.Template.Spec.ServiceAccountName = cfg.Config.ServiceAccount
-			batchJob.job.Spec.Template.Spec.Containers[0].Args = executor.BuildTagArgs(b.backup.Spec.Tags)
-			batchJob.job.Spec.Template.Spec.Volumes = batchJob.volumes
-			batchJob.job.Spec.Template.Spec.Containers[0].VolumeMounts = b.newVolumeMounts(batchJob.job.Spec.Template.Spec.Volumes)
+			batchJob.job.Spec.Template.Spec.Volumes = append(batchJob.job.Spec.Template.Spec.Volumes, batchJob.volumes...)
+			batchJob.job.Spec.Template.Spec.Volumes = append(batchJob.job.Spec.Template.Spec.Volumes, utils.AttachTLSVolumes(b.backup.Spec.Volumes)...)
+			batchJob.job.Spec.Template.Spec.Containers[0].VolumeMounts = append(b.newVolumeMounts(batchJob.volumes), b.attachTLSVolumeMounts()...)
+
+			batchJob.job.Spec.Template.Spec.Containers[0].Args = b.setupArgs()
+
+			if batchJob.job.Spec.Template.Spec.ServiceAccountName == "" {
+				batchJob.job.Spec.Template.Spec.ServiceAccountName = cfg.Config.ServiceAccount
+			}
 
 			index++
 			return nil
@@ -295,4 +310,13 @@ func (b *BackupExecutor) cleanupOldBackups(ctx context.Context) {
 
 func (b *BackupExecutor) jobName(name string) string {
 	return k8upv1.BackupType.String() + "-" + b.backup.Name + "-" + name
+}
+
+func (b *BackupExecutor) attachTLSVolumeMounts() []corev1.VolumeMount {
+	var tlsVolumeMounts []corev1.VolumeMount
+	if b.backup.Spec.Backend != nil && !utils.ZeroLen(b.backup.Spec.Backend.VolumeMounts) {
+		tlsVolumeMounts = append(tlsVolumeMounts, *b.backup.Spec.Backend.VolumeMounts...)
+	}
+
+	return utils.AttachTLSVolumeMounts(cfg.Config.PodVarDir, &tlsVolumeMounts)
 }

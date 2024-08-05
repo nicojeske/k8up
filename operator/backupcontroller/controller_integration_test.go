@@ -14,6 +14,7 @@ import (
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/types"
@@ -136,6 +137,37 @@ func (ts *BackupTestSuite) Test_GivenBackupWithSecurityContext_ExpectBackupJobWi
 	ts.Assert().NotNil(backupJob.Spec.Template.Spec.SecurityContext)
 	ts.Assert().Equal(*ts.BackupResource.Spec.PodSecurityContext, *backupJob.Spec.Template.Spec.SecurityContext)
 	ts.Assert().Equal(int64(500), *backupJob.Spec.ActiveDeadlineSeconds)
+}
+
+func (ts *BackupTestSuite) Test_GivenBackupWithTlsOptions_ExpectBackupJobWithTlsOptions() {
+	ts.BackupResource = ts.newBackupTls()
+	pvc := ts.newPvc("test-pvc", corev1.ReadWriteMany)
+	ts.EnsureResources(ts.BackupResource, pvc)
+
+	pvc.Status.Phase = corev1.ClaimBound
+	ts.UpdateStatus(pvc)
+
+	result := ts.whenReconciling(ts.BackupResource)
+	ts.Require().GreaterOrEqual(result.RequeueAfter, 30*time.Second)
+
+	backupJob := ts.expectABackupJob()
+	ts.Assert().NotNil(backupJob.Spec.Template.Spec.Volumes)
+	ts.assertBackupTlsVolumeAndTlsOptions(backupJob)
+}
+
+func (ts *BackupTestSuite) Test_GivenBackupWithMutualTlsOptions_ExpectBackupJobWithMutualTlsOptions() {
+	ts.BackupResource = ts.newBackupMutualTls()
+	pvc := ts.newPvc("test-pvc", corev1.ReadWriteMany)
+	ts.EnsureResources(ts.BackupResource, pvc)
+
+	pvc.Status.Phase = corev1.ClaimBound
+	ts.UpdateStatus(pvc)
+
+	result := ts.whenReconciling(ts.BackupResource)
+	ts.Require().GreaterOrEqual(result.RequeueAfter, 30*time.Second)
+
+	backupJob := ts.expectABackupJob()
+	ts.assertBackupMutualTlsVolumeAndMutualTlsOptions(backupJob)
 }
 
 func (ts *BackupTestSuite) Test_GivenPreBackupPods_ExpectPreBackupDeployment() {
@@ -281,7 +313,9 @@ func (ts *BackupTestSuite) Test_GivenBackupAndMountedRWOPVCOnOneNode_ExpectBacku
 
 	pvc1.Status.Phase = corev1.ClaimBound
 	pvc2.Status.Phase = corev1.ClaimBound
-	ts.UpdateStatus(pvc1, pvc2)
+	pod1.Status.Phase = corev1.PodRunning
+	pod2.Status.Phase = corev1.PodRunning
+	ts.UpdateStatus(pvc1, pvc2, pod1, pod2)
 
 	result := ts.whenReconciling(ts.BackupResource)
 	ts.Assert().GreaterOrEqual(result.RequeueAfter, 30*time.Second)
@@ -328,7 +362,9 @@ func (ts *BackupTestSuite) Test_GivenBackupAndMountedRWOPVCOnTwoNodes_ExpectBack
 
 	pvc1.Status.Phase = corev1.ClaimBound
 	pvc2.Status.Phase = corev1.ClaimBound
-	ts.UpdateStatus(pvc1, pvc2)
+	pod1.Status.Phase = corev1.PodRunning
+	pod2.Status.Phase = corev1.PodRunning
+	ts.UpdateStatus(pvc1, pvc2, pod1, pod2)
 
 	result := ts.whenReconciling(ts.BackupResource)
 	ts.Assert().GreaterOrEqual(result.RequeueAfter, 30*time.Second)
@@ -364,7 +400,9 @@ func (ts *BackupTestSuite) Test_GivenBackupAndMountedRWOPVCOnOneNodeWithFinished
 	ts.EnsureResources(ts.BackupResource, pvc1, pod1, pod2)
 
 	pvc1.Status.Phase = corev1.ClaimBound
-	ts.UpdateStatus(pvc1)
+	pod1.Status.Phase = corev1.PodRunning
+	pod2.Status.Phase = corev1.PodRunning
+	ts.UpdateStatus(pvc1, pod1, pod2)
 
 	result := ts.whenReconciling(ts.BackupResource)
 	ts.Assert().GreaterOrEqual(result.RequeueAfter, 30*time.Second)
@@ -418,6 +456,71 @@ func (ts *BackupTestSuite) Test_GivenBackupAndUnmountedRWOPVCOnTwoNodes_ExpectBa
 	job2 := jobs.Items[1]
 	ts.assertJobSpecs(&job1, nodeNamePv1, []corev1.Volume{volumePvc1}, nil, []string{})
 	ts.assertJobSpecs(&job2, nodeNamePv2, []corev1.Volume{volumePvc2}, nil, []string{})
+}
+
+func (ts *BackupTestSuite) Test_GivenBackupAndUnmountedRWOPVC_ExpectBackup() {
+	pvc1 := ts.newPvc("test-pvc-without-node-affinity", corev1.ReadWriteOnce)
+	pv1 := &corev1.PersistentVolume{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "test-pvc-without-node-affinity",
+		},
+		Spec: corev1.PersistentVolumeSpec{
+			AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+			Capacity: map[corev1.ResourceName]resource.Quantity{
+				corev1.ResourceStorage: resource.MustParse("1Mi"),
+			},
+			PersistentVolumeSource: corev1.PersistentVolumeSource{
+				HostPath: &corev1.HostPathVolumeSource{Path: "/tmp/integration-tests"},
+			},
+		},
+	}
+	volumePvc1 := corev1.Volume{
+		Name: "test-pvc-without-node-affinity",
+		VolumeSource: corev1.VolumeSource{
+			PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+				ClaimName: pvc1.Name,
+			},
+		},
+	}
+	ts.EnsureResources(ts.BackupResource, pvc1, pv1)
+
+	pvc1.Status.Phase = corev1.ClaimBound
+	ts.UpdateStatus(pvc1)
+
+	ts.whenReconciling(ts.BackupResource)
+	job := ts.expectABackupJob()
+
+	ts.Assert().Nil(job.Spec.Template.Spec.NodeSelector)
+	ts.Assert().Equal(volumePvc1.VolumeSource.PersistentVolumeClaim.ClaimName, job.Spec.Template.Spec.Volumes[0].VolumeSource.PersistentVolumeClaim.ClaimName)
+}
+
+func (ts *BackupTestSuite) Test_GivenBackupAndRWOPVCWithFinishedPod_ExpectFinishedPodToBeIgnored() {
+	pvc1 := ts.newPvc("test-pvc1", corev1.ReadWriteOnce)
+	nodeNamePod1 := "worker"
+	nodeNamePod2 := "control-plane"
+	volumePvc1 := corev1.Volume{
+		Name: "test-pvc1",
+		VolumeSource: corev1.VolumeSource{
+			PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+				ClaimName: pvc1.Name,
+			},
+		},
+	}
+	tolerations := make([]corev1.Toleration, 0)
+	pod1 := ts.newPod("test-pod1", nodeNamePod1, tolerations, []corev1.Volume{volumePvc1})
+	pod2 := ts.newPod("test-pod2", nodeNamePod2, tolerations, []corev1.Volume{volumePvc1})
+
+	ts.EnsureResources(ts.BackupResource, pvc1, pod1, pod2)
+
+	pvc1.Status.Phase = corev1.ClaimBound
+	pod1.Status.Phase = corev1.PodRunning
+	pod2.Status.Phase = corev1.PodSucceeded
+	ts.UpdateStatus(pvc1, pod1, pod2)
+
+	ts.whenReconciling(ts.BackupResource)
+	job := ts.expectABackupJob()
+
+	ts.assertJobSpecs(job, nodeNamePod1, []corev1.Volume{volumePvc1}, tolerations, []string{pod1.Name})
 }
 
 func (ts *BackupTestSuite) assertCondition(conditions []metav1.Condition, condType k8upv1.ConditionType, reason k8upv1.ConditionReason, status metav1.ConditionStatus) {
